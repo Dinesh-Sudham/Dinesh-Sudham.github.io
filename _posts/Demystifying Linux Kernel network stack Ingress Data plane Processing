@@ -1,0 +1,57 @@
+---
+title: 'Demystifying Linux Kernel network stack Ingress Data plane Processing'
+date: 2025-02-4
+permalink: /posts/2012/08/blog-post-4/
+
+## NIC to RX buffer.
+ When a network packet arrives at a NIC, it is first stored in the NIC’s internal buffers. The NIC then uses Direct Memory Access (DMA) to transfer packets to the system’s main memory, specifically into the buffers managed by the driver, updating the receive (RX) buffer’s pointers in the process. The RX buffer is a ring queue, facilitating producer (NIC) and consumer (driver) operation. This action triggers an Interrupt Request (IRQ), invoking the corresponding interrupt handler, often referred to as the TH. The Top Half (TH) acknowledges the interrupt, performs preliminary handling, and then schedules further processing in a deferred manner,
+referred to as the Bottom Half (BH).
+
+## Example Code: Scheduling and Handling Softirqs
+Interrupt Handler
+static irqreturn_t my_netdev_interrupt(int irq, void *dev_id)
+{
+    struct net_device *netdev = dev_id;
+    struct my_netdev_priv *priv = netdev_priv(netdev);
+
+    // Disable further interrupts from the NIC
+    disable_device_interrupts(netdev);
+
+    // Schedule the NAPI poll function
+    if (likely(napi_schedule_prep(&priv->napi))) {
+        __napi_schedule(&priv->napi);
+    }
+
+    return IRQ_HANDLED;
+}
+
+## NAPI Poll Function
+static int my_netdev_poll(struct napi_struct *napi, int budget)
+{
+    struct my_netdev_priv *priv = container_of(napi, struct my_netdev_priv, napi);
+    struct net_device *netdev = priv->netdev;
+    int work_done = 0;
+
+    // Process packets up to the budget limit
+    while (work_done < budget) {
+        struct sk_buff *skb;
+
+        // Fetch a packet from the device
+        skb = fetch_packet_from_device(netdev);
+        if (!skb)
+            break;
+
+        // Process the packet
+        netif_receive_skb(skb);
+        work_done++;
+    }
+
+    // If we processed fewer packets than the budget, we are done
+    if (work_done < budget) {
+        napi_complete(napi);
+        // Re-enable interrupts
+        enable_device_interrupts(netdev);
+    }
+
+    return work_done;
+}
